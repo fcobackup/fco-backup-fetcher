@@ -1,0 +1,3 @@
+/target/
+**/*.rs.bk
+docker/run/fco-backup-fetcher

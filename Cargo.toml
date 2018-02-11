@@ -1,0 +1,18 @@
+[package]
+name = "fco-backup-fetcher"
+version = "0.1.0"
+authors = ["FCO Backup <ukfcobackup@gmail.com>"]
+
+[dependencies]
+atom_syndication = "0.5"
+clap = "2.29.2"
+chrono = "0.4"
+env_logger = "^0.4"
+futures = "0.1.17"
+log = "0.3"
+reqwest = "0.8.3"
+sxd-document = "0.2.6"
+sxd-xpath = "0.4.1"
+tokio-core = "0.1.12"
+tokio-timer = "0.1.2"
+webdriver_client = "0.2.0"
