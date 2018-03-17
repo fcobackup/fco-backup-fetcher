@@ -41,7 +41,8 @@ fn main() {
                 .takes_value(true)
                 .required(false),
         )
-        .subcommand(clap::SubCommand::with_name("fetch_all"))
+        .subcommand(clap::SubCommand::with_name("initial_import"))
+        .subcommand(clap::SubCommand::with_name("discover_unannounced"))
         .subcommand(clap::SubCommand::with_name("poll_feed_once"))
         .subcommand(clap::SubCommand::with_name("poll_feed_continuous"));
     let matches = app.clone().get_matches();
@@ -89,9 +90,13 @@ fn main() {
     });
     let driver = RestartableDriver::new(build_driver);
     match matches.subcommand() {
-        ("fetch_all", _) => {
+        ("initial_import", _) => {
             fetch_all(&driver, &countries_root, &git_repo, "Initial import")
                 .expect("Error fetching all");
+        }
+        ("discover_unannounced", _) => {
+            discover_unannounced(&driver, &countries_root, &git_repo)
+                .expect("Error discovering unannounced");
         }
         ("poll_feed_once", _) => {
             poll_atom(&driver, &countries_root, &git_repo).expect("Error polling feed");
@@ -114,54 +119,13 @@ fn poll_atom(
     countries_root: &Path,
     git_repo: &Path,
 ) -> Result<(), String> {
-    let feed = retry(
-        || {
-            let response = reqwest::get("https://www.gov.uk/foreign-travel-advice.atom")
-                .map_err(|e| format!("Error fetching atom feed: {:?}", e))?;
-            if !response.status().is_success() {
-                return Err(format!(
-                    "Got status {} ({}) for atom feed",
-                    response.status(),
-                    response.status().as_u16()
-                ));
-            }
-            atom_syndication::Feed::read_from(std::io::BufReader::new(response))
-                .map_err(|e| format!("Error parsing atom feed: {:?}", e))
-        },
-        || {},
-    )?;
-
-    let last_known_timestamp = get_last_known_timestamp(&git_repo)?;
-
-    let new_entries = feed.entries()
-        .iter()
-        .rev()
-        .filter_map(|entry| {
-            let updated = chrono::DateTime::parse_from_rfc3339(entry.updated()).map_err(|e| {
-                format!(
-                    "Error parsing date ({}) from feed: {:?}",
-                    entry.updated(),
-                    e
-                )
-            });
-            match updated {
-                Ok(updated) => {
-                    if updated > last_known_timestamp.clone() {
-                        Some(Ok(entry))
-                    } else {
-                        None
-                    }
-                }
-                Err(err) => Some(Err(err)),
-            }
-        })
-        .collect::<Result<Vec<_>, String>>()?;
+    let (new_entries, all_are_new) = get_new_atom_entries(git_repo)?;
 
     if new_entries.len() == 0 {
         return Ok(());
     }
 
-    if new_entries.len() == feed.entries().len() || has_duplicates(&new_entries) {
+    if all_are_new || has_duplicates(&new_entries) {
         return fetch_all(
             &driver,
             &countries_root,
@@ -192,6 +156,55 @@ fn poll_atom(
     }
     git_push(&git_repo)?;
     Ok(())
+}
+
+fn get_new_atom_entries(git_repo: &Path) -> Result<(Vec<atom_syndication::Entry>, bool), String> {
+    let feed = retry(
+        || {
+            let response = reqwest::get("https://www.gov.uk/foreign-travel-advice.atom")
+                .map_err(|e| format!("Error fetching atom feed: {:?}", e))?;
+            if !response.status().is_success() {
+                return Err(format!(
+                    "Got status {} ({}) for atom feed",
+                    response.status(),
+                    response.status().as_u16()
+                ));
+            }
+            atom_syndication::Feed::read_from(std::io::BufReader::new(response))
+                .map_err(|e| format!("Error parsing atom feed: {:?}", e))
+        },
+        || {},
+    )?;
+
+    let last_known_timestamp = get_last_known_timestamp(&git_repo)?;
+
+    let new_entries = feed.entries()
+        .iter()
+        .map(|e| e.clone())
+        .rev()
+        .filter_map(|entry| {
+            let updated = chrono::DateTime::parse_from_rfc3339(entry.updated()).map_err(|e| {
+                format!(
+                    "Error parsing date ({}) from feed: {:?}",
+                    entry.updated(),
+                    e
+                )
+            });
+            match updated {
+                Ok(updated) => {
+                    if updated > last_known_timestamp.clone() {
+                        Some(Ok(entry))
+                    } else {
+                        None
+                    }
+                }
+                Err(err) => Some(Err(err)),
+            }
+        })
+        .collect::<Result<Vec<atom_syndication::Entry>, String>>()?;
+
+    let len = new_entries.len();
+    Ok((new_entries, feed.entries().len() == len))
 }
 
 fn parse_summary(entry: &atom_syndication::Entry) -> String {
@@ -236,7 +249,47 @@ fn fetch_all(
     Ok(())
 }
 
-fn has_duplicates(entries: &Vec<&atom_syndication::Entry>) -> bool {
+fn discover_unannounced(
+    driver: &RestartableDriver,
+    countries_root: &Path,
+    git_repo: &Path,
+) -> Result<(), String> {
+    poll_atom(driver, countries_root, git_repo)?;
+
+    if countries_root.exists() {
+        git_rm(&git_repo, &countries_root)?;
+    }
+
+    let country_list = retry(|| list_countries(&driver.get()?), || driver.restart())
+        .map_err(|e| format!("Error listing countries: {:?}", e))?;
+    for country in country_list {
+        let dir = fetch_country_dir(&driver, &countries_root, &country)?;
+        git_add(&git_repo, &dir)?;
+    }
+
+    if get_new_atom_entries(git_repo)?.0.len() > 0 {
+        error!("Changed were published while discovering unannounced changes");
+    }
+
+    let output_bytes = run_git(
+        "diff",
+        &["--name-only", "--cached"],
+        git_repo,
+        &[]
+    )?;
+
+    let message = if output_bytes.len() == 0 {
+        "No unannounced changes discovered"
+    } else {
+        "Changes discovered which weren't announced on the atom feed"
+    };
+
+    git_commit(&git_repo, message)?;
+    //git_push(&git_repo)?;
+    Ok(())
+}
+
+fn has_duplicates(entries: &Vec<atom_syndication::Entry>) -> bool {
     let urls = entries
         .iter()
         .filter_map(|entry| {
@@ -251,7 +304,7 @@ fn has_duplicates(entries: &Vec<&atom_syndication::Entry>) -> bool {
 }
 
 fn git_add(current_dir: &Path, to_add: &Path) -> Result<(), String> {
-    run_git("add", &[to_add], &current_dir, &[])
+    run_git("add", &[to_add], &current_dir, &[]).map(|_| ())
 }
 
 fn git_rm(current_dir: &Path, to_delete: &Path) -> Result<(), String> {
@@ -260,7 +313,7 @@ fn git_rm(current_dir: &Path, to_delete: &Path) -> Result<(), String> {
         &["-r", &to_delete.to_string_lossy().to_string()],
         &current_dir,
         &[],
-    )
+    ).map(|_| ())
 }
 
 fn git_commit(current_dir: &Path, message: &str) -> Result<(), String> {
@@ -279,7 +332,7 @@ fn git_commit(current_dir: &Path, message: &str) -> Result<(), String> {
         ],
         current_dir,
         &["user.name=FCO Backup", "user.email=ukfcobackup@gmail.com"],
-    )
+    ).map(|_| ())
 }
 
 fn git_push(current_dir: &Path) -> Result<(), String> {
@@ -288,7 +341,7 @@ fn git_push(current_dir: &Path) -> Result<(), String> {
         &["origin", "master"],
         current_dir,
         &["user.name=FCO Backup", "user.email=ukfcobackup@gmail.com"],
-    )
+    ).map(|_| ())
 }
 
 fn run_git<S: AsRef<std::ffi::OsStr>>(
@@ -296,18 +349,18 @@ fn run_git<S: AsRef<std::ffi::OsStr>>(
     args: &[S],
     dir: &Path,
     config_args: &[&str],
-) -> Result<(), String> {
+) -> Result<Vec<u8>, String> {
     let mut c = std::process::Command::new("git");
     for config in config_args {
         c.arg("-c").arg(config);
     }
-    let status = c.arg(command)
+    let output = c.arg(command)
         .args(args)
         .current_dir(&dir)
-        .status()
+        .output()
         .map_err(|e| format!("Error running git {}: {:?}", command, e))?;
-    if status.success() {
-        Ok(())
+    if output.status.success() {
+        Ok(output.stdout)
     } else {
         Err(format!("Error running git {}: Bad exit code", command))
     }
