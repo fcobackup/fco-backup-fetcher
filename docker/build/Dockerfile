@@ -1,5 +1,7 @@
-FROM alpine:3.7
+FROM selenium/node-chrome:latest
 
-RUN apk add --update cargo make openssl-dev
+USER root
+
+RUN apt-get update && apt-get install -y cargo make libssl-dev pkg-config
 
 VOLUME /src

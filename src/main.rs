@@ -6,6 +6,9 @@ extern crate futures;
 #[macro_use]
 extern crate log;
 extern crate reqwest;
+extern crate serde;
+#[macro_use]
+extern crate serde_json;
 extern crate sxd_document;
 extern crate sxd_xpath;
 extern crate tokio_core;
@@ -35,12 +38,6 @@ fn main() {
                 .takes_value(true)
                 .required(true),
         )
-        .arg(
-            clap::Arg::with_name("firefox")
-                .long("firefox")
-                .takes_value(true)
-                .required(false),
-        )
         .subcommand(clap::SubCommand::with_name("initial_import"))
         .subcommand(clap::SubCommand::with_name("discover_unannounced"))
         .subcommand(clap::SubCommand::with_name("poll_feed_once"))
@@ -67,21 +64,18 @@ fn main() {
 
     let countries_root = git_repo.join("countries");
 
-    let path_to_firefox = matches.value_of("firefox").map(|s| s.to_owned());
     let build_driver = Arc::new(move || {
-        let path_to_firefox = path_to_firefox.clone();
         retry(
             move || {
-                let b = webdriver_client::firefox::GeckoDriverBuilder::new();
-                let builder = match path_to_firefox.clone() {
-                    Some(firefox) => b.firefox_binary(&firefox),
-                    None => b,
-                };
-                let geckodriver = builder.spawn().map_err(|e| {
-                    format!("Error spawning GeckoDriver: {:?}", e)
+                let builder = webdriver_client::chrome::ChromeDriverBuilder::new();
+                let chromedriver = builder.spawn().map_err(|e| {
+                    format!("Error spawning ChromeDriver: {:?}", e)
                 })?;
-                geckodriver
-                    .session(&NewSessionCmd::default())
+                chromedriver
+                    .session(&NewSessionCmd::default().always_match(
+                        "goog:chromeOptions", json!({
+                    "args": ["--no-sandbox", "--headless"],
+                })))
                     .map(|d| Arc::new(d))
                     .map_err(|e| format!("Error starting browser: {:?}", e))
             },
@@ -285,7 +279,7 @@ fn discover_unannounced(
     };
 
     git_commit(&git_repo, message)?;
-    //git_push(&git_repo)?;
+    git_push(&git_repo)?;
     Ok(())
 }
 
@@ -457,7 +451,7 @@ fn list_countries(driver: &Arc<DriverSession>) -> Result<Vec<Country>, String> {
                 name: link.text().map_err(
                     |e| format!("Error getting link text: {:?}", e),
                 )?,
-                url: link.property("href").map_err(|e| {
+                url: property(driver, link, "href").map_err(|e| {
                     format!("Error getting href: {:?}", e)
                 })?,
             })
@@ -511,13 +505,13 @@ fn fetch_country(driver: &Arc<DriverSession>, url: &str) -> Result<Vec<TitleAndC
         match links.len() {
             0 => pages_to_contents.push(fetch_page(&driver)?),
             1 => {
-                links_to_follow.push(links.get(0).unwrap().property("href").map_err(|e| {
+                links_to_follow.push(property(driver, links.get(0).unwrap(), "href").map_err(|e| {
                     format!("Error getting href of link on page {}: {:?}", url, e)
                 })?)
             }
             _ => {
                 warn!("Warning: Found more than one link in a table of contents, picking first.");
-                links_to_follow.push(links.get(0).unwrap().property("href").map_err(|e| {
+                links_to_follow.push(property(driver, links.get(0).unwrap(), "href").map_err(|e| {
                     format!("Error getting href of link on page {}: {:?}", url, e)
                 })?)
             }
@@ -531,6 +525,16 @@ fn fetch_country(driver: &Arc<DriverSession>, url: &str) -> Result<Vec<TitleAndC
     }
 
     Ok(pages_to_contents)
+}
+
+fn property(session: &webdriver_client::DriverSession, element: &webdriver_client::Element, property: &str) -> Result<String, webdriver_client::Error> {
+    // ChromeDriver doesn't currently support getting element properties:
+    // https://bugs.chromium.org/p/chromedriver/issues/detail?id=1936
+    let cmd = webdriver_client::messages::ExecuteCmd {
+        script: format!("return arguments[0].{}", property),
+        args: vec![element.reference().expect("Getting element reference")],
+    };
+    session.execute(cmd).map(|v| v.as_str().unwrap_or_default().to_owned())
 }
 
 fn fetch_page(driver: &DriverSession) -> Result<TitleAndContent, String> {
