@@ -546,18 +546,21 @@ fn property(
 }
 
 fn fetch_page(driver: &DriverSession) -> Result<TitleAndContent, String> {
+    let content_elements = driver.find_elements(".govuk-govspeak", LocationStrategy::Css);
+    let content_texts = content_elements
+        .map_err(|e| format!("Error finding text: {:?}", e))?
+        .into_iter()
+        .map(|elem| elem.text())
+        .collect::<Result<Vec<String>, _>>()
+        .map_err(|e| format!("Error getting text: {:?}", e))?;
+    let mut content = content_texts.join("\n\n");
+    content += "\n";
     Ok(TitleAndContent {
         title: driver
             .find_element(".part-title", LocationStrategy::Css)
             .and_then(|elem| elem.text())
             .map_err(|e| format!("Error getting title {:?}", e))?,
-        content: format!(
-            "{}\n",
-            driver
-                .find_element(".govuk-govspeak", LocationStrategy::Css)
-                .and_then(|elem| elem.text())
-                .map_err(|e| format!("Error getting text: {:?}", e))?
-        ),
+        content: content,
     })
 }
 
