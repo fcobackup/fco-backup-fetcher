@@ -19,10 +19,10 @@ use chrono::prelude::Utc;
 use futures::stream::Stream;
 use std::collections::HashSet;
 use std::io::Write;
-use std::path::{Path, PathBuf, is_separator};
+use std::path::{is_separator, Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use webdriver_client::{Driver, DriverSession, LocationStrategy};
 use webdriver_client::messages::NewSessionCmd;
+use webdriver_client::{Driver, DriverSession, LocationStrategy};
 
 const FETCHED_AT_PREFIX: &str = "Fetched at: ";
 
@@ -59,7 +59,8 @@ fn main() {
             &["git@github.com:fcobackup/fco-backup.git", git_repo_str],
             &PathBuf::from("/"),
             &[],
-        ).expect("Git clone failed");
+        )
+        .expect("Git clone failed");
     }
 
     let countries_root = git_repo.join("countries");
@@ -68,14 +69,16 @@ fn main() {
         retry(
             move || {
                 let builder = webdriver_client::chrome::ChromeDriverBuilder::new();
-                let chromedriver = builder.spawn().map_err(|e| {
-                    format!("Error spawning ChromeDriver: {:?}", e)
-                })?;
+                let chromedriver = builder
+                    .spawn()
+                    .map_err(|e| format!("Error spawning ChromeDriver: {:?}", e))?;
                 chromedriver
                     .session(&NewSessionCmd::default().always_match(
-                        "goog:chromeOptions", json!({
-                    "args": ["--no-sandbox", "--headless"],
-                })))
+                        "goog:chromeOptions",
+                        json!({
+                            "args": ["--no-sandbox", "--headless"],
+                        }),
+                    ))
                     .map(|d| Arc::new(d))
                     .map_err(|e| format!("Error starting browser: {:?}", e))
             },
@@ -99,10 +102,15 @@ fn main() {
             poll_atom(&driver, &countries_root, &git_repo).expect("Error polling feed");
             let mut core = tokio_core::reactor::Core::new().expect("Error making tokio reactor");
             let timer = tokio_timer::Timer::default();
-            core.run(timer.interval(std::time::Duration::from_secs(5 * 60)).for_each(|()| {
-                poll_atom(&driver, &countries_root, &git_repo).expect("Error polling feed");
-                futures::future::ok(())
-            })).expect("Error scheduled polling feed");
+            core.run(
+                timer
+                    .interval(std::time::Duration::from_secs(5 * 60))
+                    .for_each(|()| {
+                        poll_atom(&driver, &countries_root, &git_repo).expect("Error polling feed");
+                        futures::future::ok(())
+                    }),
+            )
+            .expect("Error scheduled polling feed");
         }
         _ => unreachable!(),
     }
@@ -172,7 +180,8 @@ fn get_new_atom_entries(git_repo: &Path) -> Result<(Vec<atom_syndication::Entry>
 
     let last_known_timestamp = get_last_known_timestamp(&git_repo)?;
 
-    let new_entries = feed.entries()
+    let new_entries = feed
+        .entries()
         .iter()
         .map(|e| e.clone())
         .rev()
@@ -203,21 +212,19 @@ fn get_new_atom_entries(git_repo: &Path) -> Result<(Vec<atom_syndication::Entry>
 
 fn parse_summary(entry: &atom_syndication::Entry) -> String {
     match entry.summary() {
-        Some(summary) => {
-            match sxd_document::parser::parse(summary) {
-                Ok(summary_xpath) => {
-                    let summary_document = summary_xpath.as_document();
-                    match sxd_xpath::evaluate_xpath(
-                        &summary_document,
-                        "/*[local-name()='div']/*[local-name()='p']",
-                    ) {
-                        Ok(value) => value.string(),
-                        Err(_) => summary.to_owned(),
-                    }
+        Some(summary) => match sxd_document::parser::parse(summary) {
+            Ok(summary_xpath) => {
+                let summary_document = summary_xpath.as_document();
+                match sxd_xpath::evaluate_xpath(
+                    &summary_document,
+                    "/*[local-name()='div']/*[local-name()='p']",
+                ) {
+                    Ok(value) => value.string(),
+                    Err(_) => summary.to_owned(),
                 }
-                Err(_) => summary.to_owned(),
             }
-        }
+            Err(_) => summary.to_owned(),
+        },
         None => "[No summary]".to_owned(),
     }
 }
@@ -265,12 +272,7 @@ fn discover_unannounced(
         error!("Changed were published while discovering unannounced changes");
     }
 
-    let output_bytes = run_git(
-        "diff",
-        &["--name-only", "--cached"],
-        git_repo,
-        &[]
-    )?;
+    let output_bytes = run_git("diff", &["--name-only", "--cached"], git_repo, &[])?;
 
     let message = if output_bytes.len() == 0 {
         "No unannounced changes discovered"
@@ -307,7 +309,8 @@ fn git_rm(current_dir: &Path, to_delete: &Path) -> Result<(), String> {
         &["-r", &to_delete.to_string_lossy().to_string()],
         &current_dir,
         &[],
-    ).map(|_| ())
+    )
+    .map(|_| ())
 }
 
 fn git_commit(current_dir: &Path, message: &str) -> Result<(), String> {
@@ -326,7 +329,8 @@ fn git_commit(current_dir: &Path, message: &str) -> Result<(), String> {
         ],
         current_dir,
         &["user.name=FCO Backup", "user.email=ukfcobackup@gmail.com"],
-    ).map(|_| ())
+    )
+    .map(|_| ())
 }
 
 fn git_push(current_dir: &Path) -> Result<(), String> {
@@ -335,7 +339,8 @@ fn git_push(current_dir: &Path) -> Result<(), String> {
         &["origin", "master"],
         current_dir,
         &["user.name=FCO Backup", "user.email=ukfcobackup@gmail.com"],
-    ).map(|_| ())
+    )
+    .map(|_| ())
 }
 
 fn run_git<S: AsRef<std::ffi::OsStr>>(
@@ -348,7 +353,8 @@ fn run_git<S: AsRef<std::ffi::OsStr>>(
     for config in config_args {
         c.arg("-c").arg(config);
     }
-    let output = c.arg(command)
+    let output = c
+        .arg(command)
         .args(args)
         .current_dir(&dir)
         .output()
@@ -374,9 +380,8 @@ fn get_last_known_timestamp(
             String::from_utf8(output.stderr)
         ));
     }
-    let commit_message = String::from_utf8(output.stdout).map_err(|e| {
-        format!("commit message was not utf8: {:?}", e)
-    })?;
+    let commit_message = String::from_utf8(output.stdout)
+        .map_err(|e| format!("commit message was not utf8: {:?}", e))?;
     let commit_message_lines = commit_message.split("\n");
     for line in commit_message_lines.collect::<Vec<_>>().iter().rev() {
         if line.starts_with(FETCHED_AT_PREFIX) {
@@ -395,9 +400,11 @@ fn fetch_country_dir(
     country: &Country,
 ) -> Result<PathBuf, String> {
     info!("Fetching country {}", country.name);
-    let pages = retry(|| fetch_country(&driver.get()?, &country.url), || {
-        driver.restart()
-    }).map_err(|e| format!("Error fetching {}: {:?}", country.name, e))?;
+    let pages = retry(
+        || fetch_country(&driver.get()?, &country.url),
+        || driver.restart(),
+    )
+    .map_err(|e| format!("Error fetching {}: {:?}", country.name, e))?;
     let dir = countries_root.join(&country.dir_name()?);
     std::fs::remove_dir_all(&dir)
         .or_else(|e| match e.kind() {
@@ -405,9 +412,8 @@ fn fetch_country_dir(
             _ => Err(e),
         })
         .map_err(|e| format!("Error removing directory {:?}: {:?}", dir, e))?;
-    std::fs::create_dir_all(&dir).map_err(|e| {
-        format!("Error creating directory {:?}: {:?}", dir, e)
-    })?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("Error creating directory {:?}: {:?}", dir, e))?;
     for page in pages {
         let file_path = dir.join(page.file_name());
         std::fs::File::create(&file_path)
@@ -448,12 +454,11 @@ fn list_countries(driver: &Arc<DriverSession>) -> Result<Vec<Country>, String> {
         .iter()
         .map(|link| {
             Ok(Country {
-                name: link.text().map_err(
-                    |e| format!("Error getting link text: {:?}", e),
-                )?,
-                url: property(driver, link, "href").map_err(|e| {
-                    format!("Error getting href: {:?}", e)
-                })?,
+                name: link
+                    .text()
+                    .map_err(|e| format!("Error getting link text: {:?}", e))?,
+                url: property(driver, link, "href")
+                    .map_err(|e| format!("Error getting href: {:?}", e))?,
             })
         })
         .collect()
@@ -481,9 +486,9 @@ impl TitleAndContent {
 }
 
 fn fetch_country(driver: &Arc<DriverSession>, url: &str) -> Result<Vec<TitleAndContent>, String> {
-    driver.go(url).map_err(|e| {
-        format!("Error getting url {}: {:?}", url, e)
-    })?;
+    driver
+        .go(url)
+        .map_err(|e| format!("Error getting url {}: {:?}", url, e))?;
 
     let mut pages_to_contents = Vec::new();
     let mut links_to_follow = Vec::new();
@@ -493,48 +498,51 @@ fn fetch_country(driver: &Arc<DriverSession>, url: &str) -> Result<Vec<TitleAndC
             "nav[aria-label=\"Travel advice pages\"] li",
             LocationStrategy::Css,
         )
-        .map_err(|e| {
-            format!("Error finding travel advice pages on page {}: {:?}", url, e)
-        })?;
+        .map_err(|e| format!("Error finding travel advice pages on page {}: {:?}", url, e))?;
     for page in pages {
-        let links = page.find_elements("a", LocationStrategy::Css).map_err(
-            |e| {
-                format!("Error finding links: {:?}", e)
-            },
-        )?;
+        let links = page
+            .find_elements("a", LocationStrategy::Css)
+            .map_err(|e| format!("Error finding links: {:?}", e))?;
         match links.len() {
             0 => pages_to_contents.push(fetch_page(&driver)?),
-            1 => {
-                links_to_follow.push(property(driver, links.get(0).unwrap(), "href").map_err(|e| {
-                    format!("Error getting href of link on page {}: {:?}", url, e)
-                })?)
-            }
+            1 => links_to_follow.push(
+                property(driver, links.get(0).unwrap(), "href")
+                    .map_err(|e| format!("Error getting href of link on page {}: {:?}", url, e))?,
+            ),
             _ => {
                 warn!("Warning: Found more than one link in a table of contents, picking first.");
-                links_to_follow.push(property(driver, links.get(0).unwrap(), "href").map_err(|e| {
-                    format!("Error getting href of link on page {}: {:?}", url, e)
-                })?)
+                links_to_follow.push(
+                    property(driver, links.get(0).unwrap(), "href").map_err(|e| {
+                        format!("Error getting href of link on page {}: {:?}", url, e)
+                    })?,
+                )
             }
         };
     }
     for link in links_to_follow {
-        driver.go(&link).map_err(|e| {
-            format!("Error going to page {}: {:?}", url, e)
-        })?;
+        driver
+            .go(&link)
+            .map_err(|e| format!("Error going to page {}: {:?}", url, e))?;
         pages_to_contents.push(fetch_page(&driver)?);
     }
 
     Ok(pages_to_contents)
 }
 
-fn property(session: &webdriver_client::DriverSession, element: &webdriver_client::Element, property: &str) -> Result<String, webdriver_client::Error> {
+fn property(
+    session: &webdriver_client::DriverSession,
+    element: &webdriver_client::Element,
+    property: &str,
+) -> Result<String, webdriver_client::Error> {
     // ChromeDriver doesn't currently support getting element properties:
     // https://bugs.chromium.org/p/chromedriver/issues/detail?id=1936
     let cmd = webdriver_client::messages::ExecuteCmd {
         script: format!("return arguments[0].{}", property),
         args: vec![element.reference().expect("Getting element reference")],
     };
-    session.execute(cmd).map(|v| v.as_str().unwrap_or_default().to_owned())
+    session
+        .execute(cmd)
+        .map(|v| v.as_str().unwrap_or_default().to_owned())
 }
 
 fn fetch_page(driver: &DriverSession) -> Result<TitleAndContent, String> {
