@@ -163,7 +163,7 @@ fn poll_atom(
 fn get_new_atom_entries(git_repo: &Path) -> Result<(Vec<atom_syndication::Entry>, bool), String> {
     let feed = retry(
         || {
-            let response = reqwest::get("https://www.gov.uk/foreign-travel-advice.atom")
+            let response = reqwest::blocking::get("https://www.gov.uk/foreign-travel-advice.atom")
                 .map_err(|e| format!("Error fetching atom feed: {:?}", e))?;
             if !response.status().is_success() {
                 return Err(format!(
