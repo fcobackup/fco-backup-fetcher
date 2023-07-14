@@ -1,22 +1,8 @@
-extern crate atom_syndication;
-extern crate chrono;
-extern crate clap;
-extern crate env_logger;
-extern crate futures;
-#[macro_use]
-extern crate log;
-extern crate reqwest;
-extern crate serde;
-#[macro_use]
-extern crate serde_json;
-extern crate sxd_document;
-extern crate sxd_xpath;
-extern crate tokio_core;
-extern crate tokio_timer;
-extern crate webdriver_client;
-
 use chrono::prelude::Utc;
-use futures::stream::Stream;
+use clap::Parser;
+use env_logger::Target;
+use log::*;
+use serde_json::json;
 use std::collections::HashSet;
 use std::io::Write;
 use std::path::{is_separator, Path, PathBuf};
@@ -26,44 +12,50 @@ use webdriver_client::{Driver, DriverSession, LocationStrategy};
 
 const FETCHED_AT_PREFIX: &str = "Fetched at: ";
 
-fn main() {
-    init_logging();
+#[derive(clap::Parser)]
+#[command(
+    name = "FCO Backup",
+    author = "FCO Backup <ukfcobackup@gmail.com>",
+    version = "0.1.0"
+)]
+struct App {
+    #[arg(long)]
+    git_repo: PathBuf,
 
-    let mut app = clap::App::new("FCO Backup")
-        .version("0.1.0")
-        .author("FCO Backup <ukfcobackup@gmail.com>")
-        .arg(
-            clap::Arg::with_name("git-repo")
-                .long("git-repo")
-                .takes_value(true)
-                .required(true),
-        )
-        .subcommand(clap::SubCommand::with_name("initial_import"))
-        .subcommand(clap::SubCommand::with_name("discover_unannounced"))
-        .subcommand(clap::SubCommand::with_name("poll_feed_once"))
-        .subcommand(clap::SubCommand::with_name("poll_feed_continuous"));
-    let matches = app.clone().get_matches();
+    #[command(subcommand)]
+    command: Command,
+}
 
-    if matches.subcommand_name().is_none() {
-        app.print_help().unwrap();
-        println!();
-        std::process::exit(1);
-    }
+#[derive(clap::Subcommand)]
+enum Command {
+    DiscoverUnannounced,
+    InitialImport,
+    PollFeedOnce,
+}
 
-    let git_repo_str = matches.value_of("git-repo").unwrap();
-    let git_repo = PathBuf::from(git_repo_str);
+#[tokio::main]
+async fn main() {
+    env_logger::Builder::new()
+        .filter(None, LevelFilter::Info)
+        .target(Target::Stderr)
+        .init();
 
-    if !git_repo.exists() {
+    let app = App::parse();
+
+    if !app.git_repo.exists() {
         run_git(
             "clone",
-            &["git@github.com:fcobackup/fco-backup.git", git_repo_str],
+            &[
+                "git@github.com:fcobackup/fco-backup.git",
+                &format!("{}", app.git_repo.display()),
+            ],
             &PathBuf::from("/"),
             &[],
         )
         .expect("Git clone failed");
     }
 
-    let countries_root = git_repo.join("countries");
+    let countries_root = app.git_repo.join("countries");
 
     let build_driver = Arc::new(move || {
         retry(
@@ -86,33 +78,18 @@ fn main() {
         )
     });
     let driver = RestartableDriver::new(build_driver);
-    match matches.subcommand() {
-        ("initial_import", _) => {
-            fetch_all(&driver, &countries_root, &git_repo, "Initial import")
-                .expect("Error fetching all");
-        }
-        ("discover_unannounced", _) => {
-            discover_unannounced(&driver, &countries_root, &git_repo)
+    match app.command {
+        Command::DiscoverUnannounced => {
+            discover_unannounced(&driver, &countries_root, &app.git_repo)
                 .expect("Error discovering unannounced");
         }
-        ("poll_feed_once", _) => {
-            poll_atom(&driver, &countries_root, &git_repo).expect("Error polling feed");
+        Command::InitialImport => {
+            fetch_all(&driver, &countries_root, &app.git_repo, "Initial import")
+                .expect("Error fetching all");
         }
-        ("poll_feed_continuous", _) => {
-            poll_atom(&driver, &countries_root, &git_repo).expect("Error polling feed");
-            let mut core = tokio_core::reactor::Core::new().expect("Error making tokio reactor");
-            let timer = tokio_timer::Timer::default();
-            core.run(
-                timer
-                    .interval(std::time::Duration::from_secs(5 * 60))
-                    .for_each(|()| {
-                        poll_atom(&driver, &countries_root, &git_repo).expect("Error polling feed");
-                        futures::future::ok(())
-                    }),
-            )
-            .expect("Error scheduled polling feed");
+        Command::PollFeedOnce => {
+            poll_atom(&driver, &countries_root, &app.git_repo).expect("Error polling feed");
         }
-        _ => unreachable!(),
     }
 }
 
@@ -139,7 +116,7 @@ fn poll_atom(
     for entry in new_entries {
         let summary = parse_summary(&entry);
         let country = Country {
-            name: entry.title().to_owned(),
+            name: entry.title().as_str().to_owned(),
             url: entry
                 .links()
                 .iter()
@@ -186,22 +163,11 @@ fn get_new_atom_entries(git_repo: &Path) -> Result<(Vec<atom_syndication::Entry>
         .map(|e| e.clone())
         .rev()
         .filter_map(|entry| {
-            let updated = chrono::DateTime::parse_from_rfc3339(entry.updated()).map_err(|e| {
-                format!(
-                    "Error parsing date ({}) from feed: {:?}",
-                    entry.updated(),
-                    e
-                )
-            });
-            match updated {
-                Ok(updated) => {
-                    if updated > last_known_timestamp.clone() {
-                        Some(Ok(entry))
-                    } else {
-                        None
-                    }
-                }
-                Err(err) => Some(Err(err)),
+            let updated = entry.updated();
+            if updated > &last_known_timestamp {
+                Some(Ok(entry))
+            } else {
+                None
             }
         })
         .collect::<Result<Vec<atom_syndication::Entry>, String>>()?;
@@ -220,10 +186,10 @@ fn parse_summary(entry: &atom_syndication::Entry) -> String {
                     "/*[local-name()='div']/*[local-name()='p']",
                 ) {
                     Ok(value) => value.string(),
-                    Err(_) => summary.to_owned(),
+                    Err(_) => summary.as_str().to_owned(),
                 }
             }
-            Err(_) => summary.to_owned(),
+            Err(_) => summary.as_str().to_owned(),
         },
         None => "[No summary]".to_owned(),
     }
@@ -566,11 +532,13 @@ fn fetch_page(driver: &DriverSession) -> Result<TitleAndContent, String> {
 
 struct RestartableDriver {
     session: Arc<Mutex<Option<Result<Arc<DriverSession>, String>>>>,
-    build_driver: Arc<Fn() -> Result<Arc<DriverSession>, String>>,
+    build_driver: Arc<dyn Fn() -> Result<Arc<DriverSession>, String>>,
 }
 
 impl RestartableDriver {
-    pub fn new(build_driver: Arc<Fn() -> Result<Arc<DriverSession>, String>>) -> RestartableDriver {
+    pub fn new(
+        build_driver: Arc<dyn Fn() -> Result<Arc<DriverSession>, String>>,
+    ) -> RestartableDriver {
         RestartableDriver {
             session: Arc::new(Mutex::new(None)),
             build_driver: build_driver,
@@ -616,11 +584,4 @@ fn retry<Value, Error: std::fmt::Debug, Do: Fn() -> Result<Value, Error>, OnErro
         errors.push(e);
         format!("Giving up after 3 attempts: {:?}", errors)
     })
-}
-
-fn init_logging() {
-    let mut builder = env_logger::LogBuilder::new();
-    builder.filter(None, log::LogLevelFilter::Info);
-    builder.target(env_logger::LogTarget::Stderr);
-    builder.init().expect("Error initing logging");
 }
