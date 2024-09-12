@@ -84,7 +84,10 @@ async fn main() {
 
     time::sleep(Duration::from_secs(2)).await;
 
-    let driver = WebDriver::new("http://127.0.0.1:9515", DesiredCapabilities::chrome())
+    let mut capabilities = DesiredCapabilities::chrome();
+    // Required to run in docker.
+    capabilities.add_chrome_arg("--no-sandbox").expect("Failed to add --no-sandbox arg");
+    let driver = WebDriver::new("http://127.0.0.1:9515", capabilities)
         .await
         .expect("Failed to start WebDriver instance");
 
